@@ -150,6 +150,7 @@ class EVAL_AD5933:
         print(f"温度: {temperature:.2f} °C")
         return temperature
 
+
 # ========== 1. 搜索设备（按“索引数组”理解）==========
 def search_for_boards(vid=0x0456, pid=0xB203):
     """调用 ADI_CYUSB_USB4.Search_For_Boards 枚举设备并返回路径列表。
@@ -157,7 +158,7 @@ def search_for_boards(vid=0x0456, pid=0xB203):
     文档原型写成:
         Uint  Search_For_Boards (uint VID, uint PID, uint *Num_boards, char *PartPath[]);
 
-    但后面的说明又说："PartPath is a single location from the previous array, typically PartPath(0)"，
+    但后面的说明又说："PartPath is a single location from the previous array, typically PartPath(0)",
     很像是把 PartPath 当成“板卡索引数组”（每个元素是一个 char，下标 0..N-1），
     而不是字符串路径。
 
@@ -200,6 +201,8 @@ def search_for_boards(vid=0x0456, pid=0xB203):
         devices.append(str(idx_val))
 
     return result, num_boards.value, path_indices
+
+
 # ========== 2. 连接设备 ==========
 def connect(vid, pid, part_path):
     """调用 Connect 连接到指定路径的板卡。
@@ -239,6 +242,7 @@ def connect(vid, pid, part_path):
 
     return result, handle.value
 
+
 # ========== 3. 下载固件 ==========
 def download_firmware(handle, hex_file_path):
     dll.Download_Firmware.restype = wintypes.INT
@@ -255,6 +259,7 @@ def download_firmware(handle, hex_file_path):
     result = dll.Download_Firmware(handle, path_buffer)
     print(f"下载固件结果: {result} (0=成功)")
     return result
+
 
 # ========== 4. 厂商请求（读写寄存器）==========
 def vendor_request(handle, request, value, index, direction, data_length, buffer=None):
@@ -716,6 +721,92 @@ def measure_gain_factor_on_handle(handle,
     }
 
 
+def measure_single_point_on_handle(handle,
+                                   mclk_hz=4_000_000.0,
+                                   gain_factor=None):
+    """在当前 sweep 配置不变的前提下，做一次单点测量。
+
+    不重写 0x82~0x88 等 sweep 配置寄存器，只通过控制寄存器
+    STANDBY -> INIT_START_FREQ -> START_SWEEP 触发一次 DFT，
+    然后读取 Real/Imag 并返回结果。
+    """
+
+    vprint("=== 单点测量（不改配置）开始 ===")
+
+    # 读取当前起始频率代码，用于还原测量频率
+    msb = read_register_byte(handle, 0x82)
+    mid = read_register_byte(handle, 0x83)
+    lsb = read_register_byte(handle, 0x84)
+    start_code = ((msb & 0xFF) << 16) | ((mid & 0xFF) << 8) | (lsb & 0xFF)
+
+    def code_to_freq(code):
+        return code * float(mclk_hz) / float(1 << 27)
+
+    f_meas = code_to_freq(start_code)
+
+    # 读取控制寄存器，保留原有 range/gain 设置
+    ctrl_high = read_register_byte(handle, 0x80)
+    low_nibble = ctrl_high & 0x0F
+
+    standby_val = (0xB << 4) | low_nibble
+    init_val = (0x1 << 4) | low_nibble
+    start_val = (0x2 << 4) | low_nibble
+
+    # 触发一次单点测量
+    write_register_byte(handle, 0x80, standby_val)
+    write_register_byte(handle, 0x80, init_val)
+    write_register_byte(handle, 0x80, start_val)
+
+    # 轮询 DATA_VALID
+    AD5933_STAT_DATA_VALID = 0x02
+    status = 0
+    max_tries = 100
+    for _ in range(max_tries):
+        status = read_register_byte(handle, 0x8F)
+        if status & AD5933_STAT_DATA_VALID:
+            break
+        time.sleep(0.005)
+    else:
+        raise RuntimeError(
+            f"单点测量轮询 {max_tries} 次后 DATA_VALID 仍未置位, 最后状态=0x{status:02X}"
+        )
+
+    # 读取 DFT 结果
+    real_msb = read_register_byte(handle, 0x94)
+    real_lsb = read_register_byte(handle, 0x95)
+    imag_msb = read_register_byte(handle, 0x96)
+    imag_lsb = read_register_byte(handle, 0x97)
+
+    def to_signed16(msb, lsb):
+        val = ((msb & 0xFF) << 8) | (lsb & 0xFF)
+        if val & 0x8000:
+            val -= 0x10000
+        return val
+
+    real = to_signed16(real_msb, real_lsb)
+    imag = to_signed16(imag_msb, imag_lsb)
+    mag = math.sqrt(float(real * real + imag * imag))
+
+    if gain_factor is not None and mag > 0:
+        z_abs = 1.0 / (gain_factor * mag)
+    else:
+        z_abs = None
+
+    vprint(
+        f"单点: f≈{f_meas:.3f} Hz, Real={real}, Imag={imag}, "
+        f"|DFT|={mag:.3f}, |Z|={z_abs if z_abs is not None else 'N/A'}"
+    )
+
+    return {
+        "index": 0,
+        "freq_hz": f_meas,
+        "real": real,
+        "imag": imag,
+        "magnitude": mag,
+        "z_abs_ohm": z_abs,
+    }
+
+
 def measure_sweep_on_handle(handle,
                             mclk_hz=4_000_000.0,
                             gain_factor=None,
@@ -914,6 +1005,7 @@ def measure_sweep_on_handle(handle,
     print("=== Sweep 结束 ===")
     return results
 
+
 # ========== 5. 断开连接 ==========
 def disconnect(handle):
     dll.Disconnect.restype = wintypes.INT
@@ -922,6 +1014,7 @@ def disconnect(handle):
     result = dll.Disconnect(handle)
     print(f"断开结果: {result}")
     return result
+
 
 # ========== 使用示例：读取温度 ==========
 def read_temperature_example():
@@ -1059,9 +1152,7 @@ if __name__ == "__main__":
                 if not csv_path:
                     csv_path = default_csv
 
-                results = measure_sweep_on_handle(
-                    dev.handle,
-                    mclk_hz=dev.mclk_hz,
+                results = dev.sweep(
                     gain_factor=cached_gain_factor,
                     config_for_sweep=cfg_for_sweep,
                     csv_path=csv_path,
