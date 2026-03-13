@@ -10,6 +10,15 @@ import csv
 # 因此这里用 WinDLL 而不是 CDLL 以避免栈不一致导致参数解析异常。
 dll = ctypes.WinDLL(r"C:\Program Files\Analog Devices\USB Drivers\ADI_CYUSB_USB4.dll")
 
+# 全局 verbose 开关：True=详细步骤日志，False=只输出关键结果
+VERBOSE = False
+
+
+def vprint(*args, **kwargs):
+    """受 VERBOSE 控制的调试输出。"""
+    if VERBOSE:
+        print(*args, **kwargs)
+
 
 class EVAL_AD5933:
     """EVAL-AD5933 板卡高层封装。
@@ -122,7 +131,7 @@ class EVAL_AD5933:
 
         # 1) 启动温度测量
         result, _ = vendor_request(self.handle, 0xDE, 0x0D, 0x9080, 0, 0, None)
-        print(f"温度命令发送: {result}")
+        vprint(f"温度命令发送: {result}")
         time.sleep(0.05)
 
         # 2) 可选：读 0x80 / 0x8F 略
@@ -176,8 +185,8 @@ def search_for_boards(vid=0x0456, pid=0xB203):
 
     result = dll.Search_For_Boards(vid, pid, ctypes.byref(num_boards), path_indices)
 
-    print(f"搜索结果: {result} (0=成功)")
-    print(f"找到设备数: {num_boards.value}")
+    vprint(f"搜索结果: {result} (0=成功)")
+    vprint(f"找到设备数: {num_boards.value}")
 
     devices = []  # 这里保存的是“索引”的字符串表示，仅用于打印
     for i in range(num_boards.value):
@@ -187,7 +196,7 @@ def search_for_boards(vid=0x0456, pid=0xB203):
             idx_val = idx[0]
         else:
             idx_val = idx
-        print(f"  设备 {i} 索引值: {idx_val}")
+        vprint(f"  设备 {i} 索引值: {idx_val}")
         devices.append(str(idx_val))
 
     return result, num_boards.value, path_indices
@@ -543,10 +552,10 @@ def measure_gain_factor_on_handle(handle,
     返回一个 dict，便于后续 sweep 使用同一个 gain factor。
     """
 
-    print("=== Gain factor 校准开始 ===")
+    vprint("=== Gain factor 校准开始 ===")
 
     # 1. 读取当前配置
-    print("[1] 读取当前 sweep 配置...")
+    vprint("[1] 读取当前 sweep 配置...")
     cfg = get_configuration_from_handle(handle, mclk_hz=mclk_hz)
     codes = cfg["codes"]
     params = cfg["params"]
@@ -580,14 +589,14 @@ def measure_gain_factor_on_handle(handle,
     cal_code = start_code + k * delta_code
     f_cal = code_to_freq(cal_code)
 
-    print(
+    vprint(
         f"    start≈{f_start:.3f} Hz, delta≈{f_delta:.3f} Hz, N_incr={n_incr}, "
         f"选择第 {k} 个点作为校准频率 ({cal_desc})"
     )
-    print(f"[2] 计算校准频率: code=0x{cal_code:06X}, f_cal≈{f_cal:.6f} Hz")
+    vprint(f"[2] 计算校准频率: code=0x{cal_code:06X}, f_cal≈{f_cal:.6f} Hz")
 
     # 2. 将校准频率写入起始频率寄存器 0x82-0x84
-    print("[3] 写入校准频率到 0x82/0x83/0x84 ...")
+    vprint("[3] 写入校准频率到 0x82/0x83/0x84 ...")
     msb = (cal_code >> 16) & 0xFF
     mid = (cal_code >> 8) & 0xFF
     lsb = cal_code & 0xFF
@@ -598,7 +607,7 @@ def measure_gain_factor_on_handle(handle,
         write_register_byte(handle, 0x82, msb)
         ok_write = True
     except RuntimeError as e:
-        print("    写寄存器失败:", e)
+        vprint("    写寄存器失败:", e)
         ok_write = False
 
     if not ok_write:
@@ -610,12 +619,12 @@ def measure_gain_factor_on_handle(handle,
     r_lsb = read_register_byte(handle, 0x84)
     read_back_code = ((r_msb & 0xFF) << 16) | ((r_mid & 0xFF) << 8) | (r_lsb & 0xFF)
     f_read_back = code_to_freq(read_back_code)
-    print(
+    vprint(
         f"    读回 start_code = 0x{read_back_code:06X}, f≈{f_read_back:.6f} Hz"
     )
 
     # 3. 控制寄存器状态机：STANDBY -> INIT_START_FREQ -> START_SWEEP
-    print("[4] 通过控制寄存器触发一次单点测量...")
+    vprint("[4] 通过控制寄存器触发一次单点测量...")
     ctrl_high = ctrl["ctrl_high_0x80"]
     if ctrl_high is None:
         ctrl_high = read_register_byte(handle, 0x80)
@@ -627,30 +636,30 @@ def measure_gain_factor_on_handle(handle,
 
     try:
         write_register_byte(handle, 0x80, standby_val)
-        print(f"    写 0x80=0x{standby_val:02X} (STANDBY) 成功")
+        vprint(f"    写 0x80=0x{standby_val:02X} (STANDBY) 成功")
         # 按 no-OS 流程，一般会插一个 reset，这里保持简化，只做状态切换
         write_register_byte(handle, 0x80, init_val)
-        print(f"    写 0x80=0x{init_val:02X} (INIT_START_FREQ) 成功")
+        vprint(f"    写 0x80=0x{init_val:02X} (INIT_START_FREQ) 成功")
         write_register_byte(handle, 0x80, start_val)
-        print(f"    写 0x80=0x{start_val:02X} (START_SWEEP) 成功")
+        vprint(f"    写 0x80=0x{start_val:02X} (START_SWEEP) 成功")
     except RuntimeError as e:
-        print("    写控制寄存器失败:", e)
+        vprint("    写控制寄存器失败:", e)
         raise
 
     # 4. 轮询状态寄存器，等待 DATA_VALID 置位
-    print("[5] 轮询状态寄存器 0x8F 等待 DATA_VALID 置位...")
+    vprint("[5] 轮询状态寄存器 0x8F 等待 DATA_VALID 置位...")
     AD5933_STAT_DATA_VALID = 0x02
     status = 0
     max_tries = 100
     for i in range(max_tries):
         status = read_register_byte(handle, 0x8F)
         if status & AD5933_STAT_DATA_VALID:
-            print(
+            vprint(
                 f"    第 {i+1} 次读取状态 0x8F=0x{status:02X}, DATA_VALID=1"
             )
             break
         if i == 0:
-            print(f"    第 1 次读取状态 0x8F=0x{status:02X}, 继续等待...")
+            vprint(f"    第 1 次读取状态 0x8F=0x{status:02X}, 继续等待...")
         time.sleep(0.005)
     else:
         raise RuntimeError(
@@ -658,7 +667,7 @@ def measure_gain_factor_on_handle(handle,
         )
 
     # 5. 读取 Real / Imag 数据
-    print("[6] 读取 DFT 实部/虚部寄存器...")
+    vprint("[6] 读取 DFT 实部/虚部寄存器...")
     real_msb = read_register_byte(handle, 0x94)
     real_lsb = read_register_byte(handle, 0x95)
     imag_msb = read_register_byte(handle, 0x96)
@@ -673,26 +682,26 @@ def measure_gain_factor_on_handle(handle,
     real = to_signed16(real_msb, real_lsb)
     imag = to_signed16(imag_msb, imag_lsb)
 
-    print(
+    vprint(
         f"    Real: MSB=0x{real_msb:02X}, LSB=0x{real_lsb:02X} -> {real}"
     )
-    print(
+    vprint(
         f"    Imag: MSB=0x{imag_msb:02X}, LSB=0x{imag_lsb:02X} -> {imag}"
     )
 
     # 6. 计算 magnitude 与 gain factor
-    print("[7] 计算 magnitude 与 gain factor...")
+    vprint("[7] 计算 magnitude 与 gain factor...")
     magnitude = math.sqrt(float(real * real + imag * imag))
     if magnitude == 0 or z_ref_ohm == 0:
         gain_factor = None
-        print("    magnitude 或 Z_ref 为 0，无法计算 gain factor")
+        print("magnitude 或 Z_ref 为 0，无法计算 gain factor")
     else:
         gain_factor = 1.0 / (magnitude * float(z_ref_ohm))
-        print(f"    |DFT| = {magnitude:.6f}")
-        print(f"    Z_ref = {z_ref_ohm} Ω")
-        print(f"    Gain factor = {gain_factor:.6e}")
+        print(f"|DFT| = {magnitude:.6f}")
+        print(f"Z_ref = {z_ref_ohm} Ω")
+        print(f"Gain factor = {gain_factor:.6e}")
 
-    print("=== Gain factor 校准结束 ===")
+    vprint("=== Gain factor 校准结束 ===")
 
     return {
         "config": cfg,
